@@ -1,27 +1,26 @@
-package br.com.seven.training.flows.item
+package br.com.seven.training.flows.sevencoin
 
-import br.com.seven.training.contracts.ItemContract
-import br.com.seven.training.state.ItemOwnershipState
-import br.com.seven.training.state.ItemState
+import br.com.seven.training.contracts.SevenCoinContract
+import br.com.seven.training.models.SevenCoin
+import br.com.seven.training.state.SevenCoinState
 import co.paralleluniverse.fibers.Suspendable
+import net.corda.core.contracts.Amount
 import net.corda.core.contracts.Command
-import net.corda.core.contracts.UniqueIdentifier
 import net.corda.core.contracts.requireThat
-import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.*
-import net.corda.core.node.services.vault.QueryCriteria
+import net.corda.core.identity.Party
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.utilities.ProgressTracker
-import java.lang.Exception
+import java.math.BigDecimal
 
-object ItemCreationFlow {
-    @StartableByRPC
+object EnrollSevenCoin {
     @InitiatingFlow
+    @StartableByRPC
     class Initiator(
-            private val hash: String
+            private val value: Long,
+            private val wallet: Party
     ): FlowLogic<SignedTransaction>() {
-
         companion object {
             object GENERATING_TRANSACTION : ProgressTracker.Step("Generating a new transaction.")
             object VERIFYING_TRANSACTION : ProgressTracker.Step("Verifying contract constraints.")
@@ -43,29 +42,21 @@ object ItemCreationFlow {
             )
         }
 
-        override val progressTracker: ProgressTracker = tracker()
+        override val progressTracker = tracker()
 
         @Suspendable
         override fun call(): SignedTransaction {
             val notary = serviceHub.networkMapCache.notaryIdentities.single()
-            val secureHash = SecureHash.parse(hash)
-            val me = serviceHub.myInfo.legalIdentities.single()
-            val participants = serviceHub.networkMapCache.allNodes.map { it.legalIdentities.single() }.filter { it != notary }
-
-            if(!serviceHub.attachments.hasAttachment(secureHash))
-                throw Exception("Anexo ID $secureHash não foi encontrado")
 
             progressTracker.currentStep = GENERATING_TRANSACTION
-
-            val state = ItemState(secureHash, me, participants)
-            val ownershipState = ItemOwnershipState(me, UniqueIdentifier(externalId = secureHash.toString()), participants)
-            val command = Command(ItemContract.Commands.Create(), participants.map { it.owningKey })
-
+            val me = serviceHub.myInfo.legalIdentities.single()
+            val participants = mutableListOf(me, wallet)
+            val amount = Amount.fromDecimal(BigDecimal.valueOf(value), SevenCoin())
+            val state = SevenCoinState(wallet, amount, participants)
+            val txCommand = Command(SevenCoinContract.Commands.Enroll(), participants.map { it.owningKey })
             val txBuilder = TransactionBuilder(notary)
                     .addOutputState(state)
-                    .addOutputState(ownershipState)
-                    .addAttachment(secureHash)
-                    .addCommand(command)
+                    .addCommand(txCommand)
 
             progressTracker.currentStep = VERIFYING_TRANSACTION
             txBuilder.verify(serviceHub)
@@ -75,29 +66,24 @@ object ItemCreationFlow {
 
             progressTracker.currentStep = GATHERING_SIGS
             val sessions = participants.filter { it != me }.map { initiateFlow(it) }
-            val signedTx = subFlow(CollectSignaturesFlow(partSignedTx, sessions, GATHERING_SIGS.childProgressTracker()))
+            val fullySignedTx = subFlow(CollectSignaturesFlow(partSignedTx, sessions, GATHERING_SIGS.childProgressTracker()))
 
             progressTracker.currentStep = FINALISING_TRANSACTION
-            return subFlow(FinalityFlow(signedTx, sessions, FINALISING_TRANSACTION.childProgressTracker()))
+            return subFlow(FinalityFlow(fullySignedTx, sessions, FINALISING_TRANSACTION.childProgressTracker()))
         }
     }
 
     @InitiatedBy(Initiator::class)
-    class Acceptor(val otherPartySession: FlowSession): FlowLogic<SignedTransaction>() {
+    class Acceptor(val otherPartySession: FlowSession) : FlowLogic<SignedTransaction>() {
         @Suspendable
         override fun call(): SignedTransaction {
-            val signTransactionFlow = object  : SignTransactionFlow(otherPartySession) {
+            val signTransactionFlow = object : SignTransactionFlow(otherPartySession) {
                 override fun checkTransaction(stx: SignedTransaction) = requireThat {
-                    val outputState = stx.tx.outputs.filter { it.data::class == ItemOwnershipState::class }.single().data as ItemOwnershipState
-
-                    val criteria = QueryCriteria.LinearStateQueryCriteria().withExternalId(listOf(outputState.linearId.externalId!!))
-                    val responseList = serviceHub.vaultService.queryBy(ItemOwnershipState::class.java, criteria)
-                    "O item já está cadastrado com outro dono" using (responseList.states.size == 0)
                 }
             }
-            val txID = subFlow(signTransactionFlow).id
+            val txId = subFlow(signTransactionFlow).id
 
-            return subFlow(ReceiveFinalityFlow(otherPartySession, expectedTxId = txID))
+            return subFlow(ReceiveFinalityFlow(otherPartySession, expectedTxId = txId))
         }
     }
 }

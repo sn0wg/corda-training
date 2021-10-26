@@ -1,12 +1,10 @@
-package br.com.seven.training.flows.item
+package br.com.seven.training.flows.proposal
 
-import br.com.seven.training.contracts.ItemContract
+import br.com.seven.training.contracts.ProposalContract
 import br.com.seven.training.state.ItemOwnershipState
-import br.com.seven.training.state.ItemState
+import br.com.seven.training.state.ProposalState
 import co.paralleluniverse.fibers.Suspendable
-import net.corda.core.contracts.Command
-import net.corda.core.contracts.UniqueIdentifier
-import net.corda.core.contracts.requireThat
+import net.corda.core.contracts.*
 import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.*
 import net.corda.core.node.services.vault.QueryCriteria
@@ -15,13 +13,13 @@ import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.utilities.ProgressTracker
 import java.lang.Exception
 
-object ItemCreationFlow {
-    @StartableByRPC
+object ProposalCreationFlow {
     @InitiatingFlow
+    @StartableByRPC
     class Initiator(
-            private val hash: String
+            private val hash: String,
+            private val value: Long
     ): FlowLogic<SignedTransaction>() {
-
         companion object {
             object GENERATING_TRANSACTION : ProgressTracker.Step("Generating a new transaction.")
             object VERIFYING_TRANSACTION : ProgressTracker.Step("Verifying contract constraints.")
@@ -43,29 +41,34 @@ object ItemCreationFlow {
             )
         }
 
-        override val progressTracker: ProgressTracker = tracker()
+        override val progressTracker = tracker()
 
         @Suspendable
         override fun call(): SignedTransaction {
             val notary = serviceHub.networkMapCache.notaryIdentities.single()
+            val criteria = QueryCriteria.LinearStateQueryCriteria().withExternalId(listOf(hash))
+            val responseList = serviceHub.vaultService.queryBy(ItemOwnershipState::class.java, criteria)
+
+            if(responseList.states.isEmpty())
+                throw Exception("Não foi possível encontrar o item com hash $hash")
+
             val secureHash = SecureHash.parse(hash)
-            val me = serviceHub.myInfo.legalIdentities.single()
-            val participants = serviceHub.networkMapCache.allNodes.map { it.legalIdentities.single() }.filter { it != notary }
 
             if(!serviceHub.attachments.hasAttachment(secureHash))
                 throw Exception("Anexo ID $secureHash não foi encontrado")
 
             progressTracker.currentStep = GENERATING_TRANSACTION
+            val itemState = responseList.states.single()
+            val me = serviceHub.myInfo.legalIdentities.single()
+            val proposalState = ProposalState(value, itemState.state.data.linearId, me, itemState.state.data.owner)
 
-            val state = ItemState(secureHash, me, participants)
-            val ownershipState = ItemOwnershipState(me, UniqueIdentifier(externalId = secureHash.toString()), participants)
-            val command = Command(ItemContract.Commands.Create(), participants.map { it.owningKey })
-
+            val reference = ReferencedStateAndRef(StateAndRef(itemState.state, itemState.ref))
+            val txCommand = Command(ProposalContract.Commands.Create(), proposalState.participants.map { it.owningKey })
             val txBuilder = TransactionBuilder(notary)
-                    .addOutputState(state)
-                    .addOutputState(ownershipState)
+                    .addOutputState(proposalState)
+                    .addCommand(txCommand)
                     .addAttachment(secureHash)
-                    .addCommand(command)
+                    .addReferenceState(reference)
 
             progressTracker.currentStep = VERIFYING_TRANSACTION
             txBuilder.verify(serviceHub)
@@ -74,30 +77,25 @@ object ItemCreationFlow {
             val partSignedTx = serviceHub.signInitialTransaction(txBuilder)
 
             progressTracker.currentStep = GATHERING_SIGS
-            val sessions = participants.filter { it != me }.map { initiateFlow(it) }
-            val signedTx = subFlow(CollectSignaturesFlow(partSignedTx, sessions, GATHERING_SIGS.childProgressTracker()))
+            val sessions = initiateFlow(itemState.state.data.owner)
+            val fullySignedTx = subFlow(CollectSignaturesFlow(partSignedTx, setOf(sessions), GATHERING_SIGS.childProgressTracker()))
 
             progressTracker.currentStep = FINALISING_TRANSACTION
-            return subFlow(FinalityFlow(signedTx, sessions, FINALISING_TRANSACTION.childProgressTracker()))
+            return subFlow(FinalityFlow(fullySignedTx, setOf(sessions), FINALISING_TRANSACTION.childProgressTracker()))
         }
     }
 
     @InitiatedBy(Initiator::class)
-    class Acceptor(val otherPartySession: FlowSession): FlowLogic<SignedTransaction>() {
+    class Acceptor(val otherPartySession: FlowSession) : FlowLogic<SignedTransaction>() {
         @Suspendable
         override fun call(): SignedTransaction {
-            val signTransactionFlow = object  : SignTransactionFlow(otherPartySession) {
+            val signTransactionFlow = object : SignTransactionFlow(otherPartySession) {
                 override fun checkTransaction(stx: SignedTransaction) = requireThat {
-                    val outputState = stx.tx.outputs.filter { it.data::class == ItemOwnershipState::class }.single().data as ItemOwnershipState
-
-                    val criteria = QueryCriteria.LinearStateQueryCriteria().withExternalId(listOf(outputState.linearId.externalId!!))
-                    val responseList = serviceHub.vaultService.queryBy(ItemOwnershipState::class.java, criteria)
-                    "O item já está cadastrado com outro dono" using (responseList.states.size == 0)
                 }
             }
-            val txID = subFlow(signTransactionFlow).id
+            val txId = subFlow(signTransactionFlow).id
 
-            return subFlow(ReceiveFinalityFlow(otherPartySession, expectedTxId = txID))
+            return subFlow(ReceiveFinalityFlow(otherPartySession, expectedTxId = txId))
         }
     }
 }

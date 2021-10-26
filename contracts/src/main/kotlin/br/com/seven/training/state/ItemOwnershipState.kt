@@ -9,7 +9,7 @@ import net.corda.core.serialization.CordaSerializable
 
 @CordaSerializable
 @BelongsToContract(ItemContract::class)
-class ItemOwnershipState(
+data class ItemOwnershipState(
         val owner: AbstractParty,
         override val linearId: UniqueIdentifier,
         override val participants: List<AbstractParty>) : LinearState
