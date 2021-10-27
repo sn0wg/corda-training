@@ -1,0 +1,14 @@
+body {
+    /* display: block; */
+    margin: 0px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+
+/* @font-face {
+    font-family: 'Dosis';
+    src: local('Dosis'), url(./fonts/Dosis-VariableFont_wght.ttf) format('ttf');
+  } */

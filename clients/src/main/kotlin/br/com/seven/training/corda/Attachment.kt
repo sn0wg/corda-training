@@ -18,21 +18,21 @@ class Attachment : Closeable {
             val tempDir = System.getProperty("java.io.tmpdir")
             ZipInputStream(zipAttachment).use { zip ->
                 val entry: ZipEntry = zip.nextEntry
-                    var size: Int
-                    val buffer = ByteArray(2048)
+                var size: Int
+                val buffer = ByteArray(2048)
 
-                    FileOutputStream("$tempDir/${entry.name}").use {
-                        ByteArrayOutputStream(buffer.size).use {
+                FileOutputStream("$tempDir/${entry.name}").use {
+                    ByteArrayOutputStream(buffer.size).use {
+                        size = zip.read(buffer, 0, buffer.size)
+                        while (size > 0) {
+                            it.write(buffer, 0, size)
                             size = zip.read(buffer, 0, buffer.size)
-                            while (size > 0) {
-                                it.write(buffer, 0, size)
-                                size = zip.read(buffer, 0, buffer.size)
-                            }
-                            val resource = ByteArrayResource(it.toByteArray())
-                            File("$tempDir/${entry.name}").delete()
-                            return resource
                         }
+                        val resource = ByteArrayResource(it.toByteArray())
+                        File("$tempDir/${entry.name}").delete()
+                        return resource
                     }
+                }
             }
         }
     }
